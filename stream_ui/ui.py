@@ -324,6 +324,22 @@ def render_ui(config: Dict[str, Any]) -> str:
   }}
   .param-input:focus {{ border-color: var(--border-lit); }}
 
+  /* Hide number input arrows */
+  input[type=number]::-webkit-inner-spin-button, 
+  input[type=number]::-webkit-outer-spin-button {{ 
+    -webkit-appearance: none; 
+    margin: 0; 
+  }}
+  input[type=number] {{
+    -moz-appearance: textfield;
+  }}
+
+  #ws-timeout-input {{
+    outline: none;
+    transition: border-color 0.15s;
+  }}
+  #ws-timeout-input:focus {{ border-color: var(--border-lit) !important; }}
+
   /* ── WS Send Bar ──────────────────────────────────────────────── */
   #ws-send-bar {{
     display: none; padding: 10px 20px; border-bottom: 1px solid var(--border);
@@ -482,6 +498,9 @@ def render_ui(config: Dict[str, Any]) -> str:
       <button class="btn btn-connect-sse" id="btn-sse" onclick="connectSSE()">
         ▶ Connect SSE
       </button>
+      <button class="btn btn-connect-sse" id="btn-resume-sse" onclick="manualReconnectSSE()" style="display:none; background: rgba(232,169,58,0.1); color: var(--accent-warn); border-color: rgba(232,169,58,0.3);">
+        ↻ Resume
+      </button>
       <button class="btn btn-connect-ws" id="btn-ws" onclick="connectWS()" style="display:none">
         ▶ Connect WS
       </button>
@@ -507,6 +526,14 @@ def render_ui(config: Dict[str, Any]) -> str:
       <span id="reconnect-count" style="font-size:10px; color: var(--text-dim); margin-left: 16px; display:none">
         Reconnected <span id="reconnect-num">0</span>x
       </span>
+    </div>
+
+    <!-- WS settings (shown for WS) -->
+    <div id="ws-settings" style="display:none; padding: 6px 20px; background: var(--bg-panel); border-bottom: 1px solid var(--border);">
+      <label class="reconnect-label">
+        Idle timeout (sec):
+        <input type="number" id="ws-timeout-input" value="0" min="0" style="width: 60px; background: var(--bg-input); color: var(--text-bright); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px 6px; margin-left: 8px; font-family: var(--font-mono); font-size: 11px;" onchange="resetWsTimeout()" />
+      </label>
     </div>
 
     <!-- Message queue (shown when WS disconnected with queued messages) -->
@@ -566,6 +593,7 @@ let state = {{
   lastEventId: null,
   reconnectCount: 0,
   gracefulClose: false,
+  sseDropped: false,  // true when connection dropped and auto-reconnect is OFF
   msgQueue: [],
   wsTimeout: null,
 }};
@@ -702,6 +730,7 @@ function selectEndpoint(ep) {{
 
   // Show correct connect button
   document.getElementById('btn-sse').style.display = ep.kind === 'sse' ? '' : 'none';
+  document.getElementById('btn-resume-sse').style.display = 'none';
   document.getElementById('btn-ws').style.display  = ep.kind === 'ws'  ? '' : 'none';
   document.getElementById('btn-disconnect').style.display = 'none';
 
@@ -712,6 +741,7 @@ function selectEndpoint(ep) {{
   document.getElementById('reconnect-toggle').style.display = 'none';
   document.getElementById('msg-queue-bar').style.display = 'none';
   document.getElementById('headers-panel').style.display = 'none';
+  document.getElementById('ws-settings').style.display = ep.kind === 'ws' ? '' : 'none';
 
   // Description
   const descBar = document.getElementById('description-bar');
@@ -781,6 +811,7 @@ function connectSSE() {{
   state.lastEventId = null;
   state.reconnectCount = 0;
   state.gracefulClose = false;
+  state.sseDropped = false;
 
   document.getElementById('reconnect-toggle').style.display = '';
   document.getElementById('reconnect-count').style.display = 'none';
@@ -838,8 +869,9 @@ function connectSSE() {{
 
       if (!autoReconnect) {{
         setStatus('error', 'disconnected');
-        appendEvent('err', null, 'Connection closed (auto-reconnect disabled)');
+        appendEvent('err', null, 'Connection closed \u2014 click \u21bb Resume to reconnect manually');
         setDot(path, 'error');
+        state.sseDropped = true;
         toggleButtons(false);
         return;
       }}
@@ -958,6 +990,14 @@ function connectSSEWithUrl(path, url, ep) {{
   }}, true);
 }}
 
+function manualReconnectSSE() {{
+  const ep = state.active;
+  const path = document.getElementById('url-bar').value.trim() || ep?.path;
+  if (!path) return;
+  const newUrl = buildUrl(path, collectParams(ep)) + getAuthQueryString();
+  connectSSEWithUrl(path, newUrl, ep);
+}}
+
 async function fetchHeaders(path, params) {{
   try {{
     const url = new URL(path, location.origin);
@@ -1004,6 +1044,7 @@ function connectWS() {{
     appendEvent('sys', null, 'WebSocket opened');
     setDot(path, 'live');
     toggleButtons(true);
+    resetWsTimeout();
 
     // Send queued messages
     if (state.msgQueue.length > 0) {{
@@ -1016,17 +1057,10 @@ function connectWS() {{
       state.msgQueue = [];
       updateQueueBar();
     }}
-
-    // Start idle timeout (disabled by default - set to 0 to enable, e.g. 30000 for 30s)
-    // clearTimeout(state.wsTimeout);
-    // state.wsTimeout = setTimeout(() => {{
-    //   if (ws.readyState === WebSocket.OPEN) {{
-    //     ws.close(1000, 'idle timeout');
-    //   }}
-    // }}, 30000);
   }};
 
   ws.onmessage = (e) => {{
+    resetWsTimeout();
     appendEvent('in-ws', null, e.data);
   }};
 
@@ -1063,8 +1097,22 @@ function wsSend() {{
   }}
 
   ws.send(msg);
+  resetWsTimeout();
   appendEvent('out', null, msg);
   input.value = '';
+}}
+
+function resetWsTimeout() {{
+  clearTimeout(state.wsTimeout);
+  if (!state.connection || state.connection.readyState !== WebSocket.OPEN) return;
+  const timeoutSec = parseInt(document.getElementById('ws-timeout-input').value) || 0;
+  if (timeoutSec > 0) {{
+    state.wsTimeout = setTimeout(() => {{
+      if (state.connection && state.connection.readyState === WebSocket.OPEN) {{
+        state.connection.close(1000, 'idle timeout');
+      }}
+    }}, timeoutSec * 1000);
+  }}
 }}
 
 function updateQueueBar() {{
@@ -1099,6 +1147,7 @@ function disconnect() {{
   setStatus('idle', 'disconnected');
   appendEvent('sys', null, 'Disconnected');
   toggleButtons(false);
+  state.sseDropped = false;
   document.getElementById('reconnect-toggle').style.display = 'none';
   document.getElementById('headers-panel').style.display = 'none';
   const path = state.active?.path ?? '';
@@ -1175,8 +1224,12 @@ function setStatus(cls, text) {{
 
 function toggleButtons(isConnected) {{
   const ep = state.active;
+  const showResume = !isConnected && ep?.kind === 'sse' && state.sseDropped;
+
   document.getElementById('btn-sse').style.display
     = (!isConnected && ep?.kind === 'sse') ? '' : 'none';
+  document.getElementById('btn-resume-sse').style.display
+    = showResume ? '' : 'none';
   document.getElementById('btn-ws').style.display
     = (!isConnected && ep?.kind === 'ws') ? '' : 'none';
   document.getElementById('btn-disconnect').style.display
