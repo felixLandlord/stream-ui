@@ -994,6 +994,8 @@ function manualReconnectSSE() {{
   const ep = state.active;
   const path = document.getElementById('url-bar').value.trim() || ep?.path;
   if (!path) return;
+  state.reconnectCount++;
+  state.sseDropped = false;
   const newUrl = buildUrl(path, collectParams(ep)) + getAuthQueryString();
   connectSSEWithUrl(path, newUrl, ep);
 }}
