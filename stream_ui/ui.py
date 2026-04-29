@@ -279,6 +279,13 @@ def render_ui(config: Dict[str, Any]) -> str:
   .status-pill.error   {{ background: rgba(240,80,80,0.12); color: var(--accent-err); border: 1px solid rgba(240,80,80,0.3); }}
   .status-pill.waiting {{ background: rgba(232,169,58,0.12); color: var(--accent-warn); border: 1px solid rgba(232,169,58,0.3); }}
 
+  .status-pill.reconnecting {{ background: rgba(124,106,247,0.12); color: var(--accent-ws); border: 1px solid rgba(124,106,247,0.3); animation: pulse 0.8s infinite; }}
+
+  /* ── Reconnect toggle ─────────────────────────────────────────── */
+  .reconnect-row {{ display: flex; gap: 8px; align-items: center; margin-top: 6px; }}
+  .reconnect-label {{ font-size: 10px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; }}
+  .reconnect-label input {{ accent-color: var(--accent-sse); }}
+
   /* ── Params Panel ─────────────────────────────────────────────── */
   #params-panel {{
     border-bottom: 1px solid var(--border); padding: 12px 20px;
@@ -485,6 +492,29 @@ def render_ui(config: Dict[str, Any]) -> str:
       <span class="status-pill idle" id="status-pill">idle</span>
     </div>
 
+    <!-- Response headers display (shown when SSE connects) -->
+    <div id="headers-panel" style="display:none; padding: 6px 20px; background: var(--bg-panel); border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: 10px;">
+      <span style="color: var(--text-dim);">Response headers:</span>
+      <span id="response-headers" style="color: var(--text); margin-left: 8px;"></span>
+    </div>
+
+    <!-- Reconnect toggle (shown for SSE) -->
+    <div id="reconnect-toggle" style="display:none; padding: 6px 20px; background: var(--bg-panel); border-bottom: 1px solid var(--border);">
+      <label class="reconnect-label">
+        <input type="checkbox" id="auto-reconnect" checked />
+        Auto-reconnect on disconnect
+      </label>
+      <span id="reconnect-count" style="font-size:10px; color: var(--text-dim); margin-left: 16px; display:none">
+        Reconnected <span id="reconnect-num">0</span>x
+      </span>
+    </div>
+
+    <!-- Message queue (shown when WS disconnected with queued messages) -->
+    <div id="msg-queue-bar" style="display:none; padding: 6px 20px; background: rgba(232,169,58,0.08); border-bottom: 1px solid var(--border);">
+      <span id="queue-count" style="font-size:11px; color: var(--accent-warn);"></span>
+      <button class="btn" style="padding:3px 10px; font-size:10px; margin-left:12px; background: var(--bg-input); border: 1px solid var(--border); color: var(--text); cursor:pointer" onclick="clearQueue()">Clear queue</button>
+    </div>
+
     <!-- Params -->
     <div id="params-panel">
       <div class="params-grid" id="params-grid"></div>
@@ -533,6 +563,11 @@ let state = {{
   kind: null,         // "sse" | "ws"
   eventCount: 0,
   dotRefs: {{}},       // path -> status dot element
+  lastEventId: null,
+  reconnectCount: 0,
+  gracefulClose: false,
+  msgQueue: [],
+  wsTimeout: null,
 }};
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -673,6 +708,11 @@ function selectEndpoint(ep) {{
   // WS send bar
   document.getElementById('ws-send-bar').classList.toggle('visible', ep.kind === 'ws');
 
+  // Hide stale SSE / WS UI from previous connection
+  document.getElementById('reconnect-toggle').style.display = 'none';
+  document.getElementById('msg-queue-bar').style.display = 'none';
+  document.getElementById('headers-panel').style.display = 'none';
+
   // Description
   const descBar = document.getElementById('description-bar');
   if (ep.description) {{
@@ -738,6 +778,15 @@ function connectSSE() {{
 
   if (state.connection) disconnect();
 
+  state.lastEventId = null;
+  state.reconnectCount = 0;
+  state.gracefulClose = false;
+
+  document.getElementById('reconnect-toggle').style.display = '';
+  document.getElementById('reconnect-count').style.display = 'none';
+  document.getElementById('reconnect-num').textContent = '0';
+  document.getElementById('headers-panel').style.display = 'none';
+
   const params = ep ? collectParams(ep) : {{}};
   const url = buildUrl(path, params) + getAuthQueryString();
 
@@ -751,28 +800,77 @@ function connectSSE() {{
 
   es.onopen = () => {{
     setStatus('live', 'connected');
-    appendEvent('sys', null, 'Connection established');
+    if (state.reconnectCount > 0) {{
+      appendEvent('sys', null, `Reconnected (${{state.reconnectCount}}x)${{state.lastEventId ? ', last-id: ' + state.lastEventId : ''}}`);
+    }} else {{
+      appendEvent('sys', null, 'Connection established');
+    }}
     setDot(path, 'live');
     toggleButtons(true);
+
+    // Show headers (fetched via separate request since EventSource doesn't expose them)
+    fetchHeaders(path, params);
   }};
 
   es.onmessage = (e) => {{
+    if (e.lastEventId) state.lastEventId = e.lastEventId;
     appendEvent('in', e.lastEventId ? `id:${{e.lastEventId}}` : null, e.data);
   }};
 
-  es.onerror = (e) => {{
-    if (es.readyState === EventSource.CLOSED) {{
-      setStatus('error', 'closed');
-      appendEvent('err', null, 'Connection closed or error');
+  es.onerror = () => {{
+    const autoReconnect = document.getElementById('auto-reconnect')?.checked ?? true;
+
+    if (state.gracefulClose) {{
+      setStatus('idle', 'closed by server');
+      appendEvent('sys', null, 'Server ended the stream');
+      setDot(path, '');
+      state.connection = null;
+      es.close();
+      toggleButtons(false);
+      return;
+    }}
+
+    // EventSource fires onerror with readyState=CONNECTING (not CLOSED) when the
+    // server drops — the browser is natively retrying. We take over immediately.
+    if (es.readyState !== EventSource.OPEN) {{
+      es.close(); // stop the browser's own reconnect loop
+      state.connection = null;
+
+      if (!autoReconnect) {{
+        setStatus('error', 'disconnected');
+        appendEvent('err', null, 'Connection closed (auto-reconnect disabled)');
+        setDot(path, 'error');
+        toggleButtons(false);
+        return;
+      }}
+
+      // Auto-reconnect with Last-Event-ID
+      state.reconnectCount++;
+      document.getElementById('reconnect-count').style.display = '';
+      document.getElementById('reconnect-num').textContent = state.reconnectCount;
+
+      setStatus('reconnecting', `reconnecting… (${{state.reconnectCount}})`);
+      appendEvent('sys', null, `Connection lost, reconnecting…${{state.lastEventId ? ' (last-id: ' + state.lastEventId + ')' : ''}}`);
       setDot(path, 'error');
+      toggleButtons(false);
+
+      const newUrl = buildUrl(path, collectParams(ep)) + getAuthQueryString();
+      setTimeout(() => {{
+        if (state.kind === 'sse' && !state.connection) connectSSEWithUrl(path, newUrl, ep);
+      }}, 2000);
     }}
   }};
 
-  // Also listen for named events via a Proxy-like approach
-  // (apps can emit named events; we patch addEventListener)
+  // Handle graceful close event
+  es.addEventListener('close', () => {{
+    state.gracefulClose = true;
+    appendEvent('sys', null, 'Received close event from server');
+  }}, true);
+
+  // Named events via patch
   const origAdd = es.addEventListener.bind(es);
   es.addEventListener = (type, handler, opts) => {{
-    if (type !== 'message' && type !== 'error' && type !== 'open') {{
+    if (type !== 'message' && type !== 'error' && type !== 'open' && type !== 'close') {{
       origAdd(type, (e) => {{
         appendEvent('in', `event:${{type}}`, e.data);
       }}, opts);
@@ -782,6 +880,99 @@ function connectSSE() {{
   }};
 }}
 
+function connectSSEWithUrl(path, url, ep) {{
+  // null out any stale reference before creating a new one
+  state.connection = null;
+  state.gracefulClose = false;
+
+  setStatus('waiting', 'reconnecting…');
+
+  const es = new EventSource(url);
+  state.connection = es;
+  state.kind = 'sse';
+
+  // Make sure the reconnect toggle stays visible
+  document.getElementById('reconnect-toggle').style.display = '';
+
+  es.onopen = () => {{
+    setStatus('live', 'connected');
+    appendEvent('sys', null, `Reconnected (${{state.reconnectCount}}x)${{state.lastEventId ? ', last-id: ' + state.lastEventId : ''}}`);
+    // Update reconnect counter display
+    document.getElementById('reconnect-count').style.display = '';
+    document.getElementById('reconnect-num').textContent = state.reconnectCount;
+    setDot(path, 'live');
+    toggleButtons(true);
+  }};
+
+  es.onmessage = (e) => {{
+    if (e.lastEventId) state.lastEventId = e.lastEventId;
+    appendEvent('in', e.lastEventId ? `id:${{e.lastEventId}}` : null, e.data);
+  }};
+
+  es.onerror = () => {{
+    const autoReconnect = document.getElementById('auto-reconnect')?.checked ?? true;
+
+    if (state.gracefulClose) {{
+      setStatus('idle', 'closed by server');
+      appendEvent('sys', null, 'Server ended the stream');
+      setDot(path, '');
+      state.connection = null;
+      es.close();
+      toggleButtons(false);
+      return;
+    }}
+
+    if (es.readyState !== EventSource.OPEN) {{
+      es.close();
+      state.connection = null;
+
+      if (!autoReconnect) {{
+        setStatus('error', 'disconnected');
+        appendEvent('err', null, 'Connection closed (auto-reconnect disabled)');
+        setDot(path, 'error');
+        toggleButtons(false);
+        return;
+      }}
+
+      // Continue auto-reconnecting
+      state.reconnectCount++;
+      document.getElementById('reconnect-count').style.display = '';
+      document.getElementById('reconnect-num').textContent = state.reconnectCount;
+
+      setStatus('reconnecting', `reconnecting… (${{state.reconnectCount}})`);
+      appendEvent('sys', null, `Connection lost, reconnecting…${{state.lastEventId ? ' (last-id: ' + state.lastEventId + ')' : ''}}`);
+      setDot(path, 'error');
+      toggleButtons(false);
+
+      const newUrl = buildUrl(path, collectParams(ep)) + getAuthQueryString();
+      setTimeout(() => {{
+        if (state.kind === 'sse' && !state.connection) connectSSEWithUrl(path, newUrl, ep);
+      }}, 2000);
+    }}
+  }};
+
+  // Handle graceful close event
+  es.addEventListener('close', () => {{
+    state.gracefulClose = true;
+    appendEvent('sys', null, 'Received close event from server');
+  }}, true);
+}}
+
+async function fetchHeaders(path, params) {{
+  try {{
+    const url = new URL(path, location.origin);
+    const mergedParams = {{...collectParams(state.active), ...params}};
+    Object.entries(mergedParams).forEach(([k, v]) => url.searchParams.append(k, v));
+    const res = await fetch(url.toString(), {{ method: 'HEAD' }});
+    const headers = [];
+    res.headers.forEach((v, k) => headers.push(`${{k}}: ${{v}}`));
+    if (headers.length) {{
+      document.getElementById('headers-panel').style.display = '';
+      document.getElementById('response-headers').textContent = headers.join(', ');
+    }}
+  }} catch (e) {{}}
+}}
+
 // ── WebSocket ──────────────────────────────────────────────────────────────
 function connectWS() {{
   const ep = state.active;
@@ -789,6 +980,8 @@ function connectWS() {{
   if (!path) return;
 
   if (state.connection) disconnect();
+
+  updateQueueBar();
 
   const params = ep ? collectParams(ep) : {{}};
   const token = document.getElementById('bearer-token').value.trim();
@@ -811,6 +1004,26 @@ function connectWS() {{
     appendEvent('sys', null, 'WebSocket opened');
     setDot(path, 'live');
     toggleButtons(true);
+
+    // Send queued messages
+    if (state.msgQueue.length > 0) {{
+      appendEvent('sys', null, `Sending ${{state.msgQueue.length}} queued message(s)…`);
+      state.msgQueue.forEach((msg, i) => {{
+        ws.send(msg);
+        appendEvent('out', null, msg);
+      }});
+      appendEvent('sys', null, `${{state.msgQueue.length}} queued message(s) sent`);
+      state.msgQueue = [];
+      updateQueueBar();
+    }}
+
+    // Start idle timeout (disabled by default - set to 0 to enable, e.g. 30000 for 30s)
+    // clearTimeout(state.wsTimeout);
+    // state.wsTimeout = setTimeout(() => {{
+    //   if (ws.readyState === WebSocket.OPEN) {{
+    //     ws.close(1000, 'idle timeout');
+    //   }}
+    // }}, 30000);
   }};
 
   ws.onmessage = (e) => {{
@@ -818,11 +1031,13 @@ function connectWS() {{
   }};
 
   ws.onclose = (e) => {{
+    clearTimeout(state.wsTimeout);
     setStatus('idle', `closed (${{e.code}})`);
     appendEvent('sys', null, `WebSocket closed — code ${{e.code}}`);
     setDot(path, '');
     toggleButtons(false);
     state.connection = null;
+    updateQueueBar();
   }};
 
   ws.onerror = () => {{
@@ -830,17 +1045,43 @@ function connectWS() {{
     appendEvent('err', null, 'WebSocket error');
     setDot(path, 'error');
   }};
-}}
+}};
 
 function wsSend() {{
   const ws = state.connection;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const input = document.getElementById('ws-message');
   const msg = input.value.trim();
   if (!msg) return;
+
+  if (!ws || ws.readyState !== WebSocket.OPEN) {{
+    // Queue message for when connection is restored
+    state.msgQueue.push(msg);
+    appendEvent('out', null, `[queued] ${{msg}}`);
+    updateQueueBar();
+    input.value = '';
+    return;
+  }}
+
   ws.send(msg);
   appendEvent('out', null, msg);
   input.value = '';
+}}
+
+function updateQueueBar() {{
+  const bar = document.getElementById('msg-queue-bar');
+  const count = document.getElementById('queue-count');
+  if (state.msgQueue.length > 0) {{
+    bar.style.display = '';
+    count.textContent = `${{state.msgQueue.length}} message(s) queued — will send on reconnect`;
+  }} else {{
+    bar.style.display = 'none';
+  }}
+}}
+
+function clearQueue() {{
+  state.msgQueue = [];
+  updateQueueBar();
+  appendEvent('sys', null, 'Message queue cleared');
 }}
 
 function onWsMessageKey(e) {{
@@ -854,9 +1095,12 @@ function disconnect() {{
   if (state.kind === 'ws' && state.connection.readyState < 2)
     state.connection.close(1000, 'user disconnect');
   state.connection = null;
+  clearTimeout(state.wsTimeout);
   setStatus('idle', 'disconnected');
   appendEvent('sys', null, 'Disconnected');
   toggleButtons(false);
+  document.getElementById('reconnect-toggle').style.display = 'none';
+  document.getElementById('headers-panel').style.display = 'none';
   const path = state.active?.path ?? '';
   if (path) setDot(path, '');
 }}
