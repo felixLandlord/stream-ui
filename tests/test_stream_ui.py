@@ -22,7 +22,7 @@ from httpx import AsyncClient, ASGITransport
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from stream_ui import mount_stream_ui, sse_endpoint, ws_endpoint
+from stream_ui import StreamUI, sse_endpoint, ws_endpoint
 from stream_ui.decorators import get_meta
 from stream_ui.registry import StreamUIRegistry
 
@@ -58,7 +58,7 @@ def make_app() -> FastAPI:
         except WebSocketDisconnect:
             pass
 
-    mount_stream_ui(app, path="/stream-ui")
+    StreamUI(app, path="/stream-ui").mount()
     return app
 
 
@@ -238,7 +238,7 @@ class TestMount:
 
     def test_custom_mount_path(self):
         app = FastAPI()
-        mount_stream_ui(app, path="/devtools")
+        StreamUI(app, path="/devtools").mount()
         client = TestClient(app)
         res = client.get("/devtools")
         assert res.status_code == 200
@@ -258,7 +258,7 @@ class TestMount:
 
     def test_default_token_embedded(self):
         app = FastAPI()
-        mount_stream_ui(app, default_token="test-tok-123")
+        StreamUI(app, default_token="test-tok-123").mount()
         client = TestClient(app)
         res = client.get("/stream-ui")
         assert "test-tok-123" in res.text
@@ -310,3 +310,94 @@ class TestWebSocket:
             for i in range(5):
                 ws.send_text(str(i))
                 assert ws.receive_text() == f"echo:{i}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network drop simulation tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNetworkDropScenarios:
+
+    def test_unreliable_sse_stream_drops_after_10_events(self):
+        app = FastAPI()
+
+        @app.get("/events/unreliable")
+        @sse_endpoint(summary="Unreliable", tags=["Test"])
+        async def unreliable():
+            async def gen():
+                for i in range(10):
+                    yield f"data: {json.dumps({'count': i})}\n\n"
+                    await asyncio.sleep(0.01)
+            return StreamingResponse(gen(), media_type="text/event-stream")
+
+        StreamUI(app).mount()
+        client = TestClient(app, raise_server_exceptions=False)
+
+        events = []
+        disconnected = False
+        try:
+            with client.stream("GET", "/events/unreliable") as res:
+                for line in res.iter_lines():
+                    if line.startswith("data:"):
+                        events.append(line)
+        except Exception:
+            disconnected = True
+
+        assert disconnected or len(events) == 10
+
+    def test_unreliable_sse_emits_reconnect_event(self):
+        app = FastAPI()
+
+        @app.get("/events/unreliable")
+        @sse_endpoint(summary="Unreliable", tags=["Test"])
+        async def unreliable():
+            async def gen():
+                for i in range(10):
+                    if i == 9:
+                        yield "event: reconnect\ndata: {}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'count': i})}\n\n"
+            return StreamingResponse(gen(), media_type="text/event-stream")
+
+        StreamUI(app).mount()
+        client = TestClient(app, raise_server_exceptions=False)
+
+        reconnect_seen = False
+        with client.stream("GET", "/events/unreliable") as res:
+            for line in res.iter_lines():
+                if line.startswith("event:"):
+                    reconnect_seen = True
+                    break
+
+        assert reconnect_seen
+
+    def test_flaky_ws_sends_heartbeats_then_drops(self):
+        app = FastAPI()
+
+        @app.websocket("/ws/flaky")
+        @ws_endpoint(summary="Flaky", tags=["Test"], path="/ws/flaky")
+        async def flaky(websocket: WebSocket):
+            await websocket.accept()
+            for i in range(5):
+                await websocket.send_text(json.dumps({"type": "heartbeat", "count": i + 1}))
+                await asyncio.sleep(0.01)
+            await websocket.send_text(json.dumps({"type": "dropping", "reason": "simulated"}))
+            await websocket.close()
+
+        StreamUI(app).mount()
+        client = TestClient(app)
+
+        with client.websocket_connect("/ws/flaky") as ws:
+            heartbeats = 0
+            saw_drop = False
+            for _ in range(10):
+                msg = ws.receive_text()
+                data = json.loads(msg)
+                if data["type"] == "heartbeat":
+                    heartbeats += 1
+                elif data["type"] == "dropping":
+                    saw_drop = True
+                    break
+
+            assert heartbeats == 5
+            assert saw_drop

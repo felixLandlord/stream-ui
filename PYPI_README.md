@@ -33,26 +33,6 @@ StreamUI(app).mount()
 
 ---
 
-## Screenshots
-
-### Server-Sent Events (SSE)
-![SSE Stream](screenshots/sse.png)
-*Real-time event streaming with automatic reconnects and parameter support.*
-
-### Manual Resume
-![SSE Resume](screenshots/sse_resume.png)
-*Toggle auto-reconnect or manually resume dropped streams.*
-
-### WebSockets
-![WebSocket](screenshots/ws.png)
-*Interactive WebSocket sessions with a persistent message history.*
-
-### Message Queueing
-![WS Queue](screenshots/ws_queue.png)
-*Queue messages while disconnected; they are sent automatically upon reconnection.*
-
----
-
 ## Decorators
 
 ### `@sse_endpoint(...)`
@@ -190,73 +170,6 @@ StreamUI(
     default_token=None,       # Pre-fill bearer token field
     enable_api_key=True,      # Show API key field in auth panel
 ).mount()
-```
-
----
-
-## Run the example
-
-```bash
-git clone https://github.com/felixLandlord/stream-ui
-cd stream-ui
-uv sync
-
-# macOS / Linux
-source .venv/bin/activate
-
-# Windows (PowerShell)
-.venv\Scripts\Activate.ps1
-
-uvicorn example.app:app --reload
-```
-
-Open **http://localhost:8000/stream-ui** — you'll find:
-
-| Endpoint             | Kind | Description                        |
-|----------------------|------|------------------------------------|
-| `/events/ticker`     | SSE  | Fake price feed (try `symbol=ETH`) |
-| `/events/system`     | SSE  | Named events: cpu / memory / disk  |
-| `/events/logs`       | SSE  | Log tail with level filter         |
-| `/ws/echo`           | WS   | Echo socket                        |
-| `/ws/chat`           | WS   | Multi-client broadcast chat        |
-| `/ws/calc`           | WS   | JSON calculator                    |
-
----
-
-## Run the tests
-
-```bash
-pytest tests/ -v
-```
-
----
-
-## How it works
-
-Stream-ui uses the same mounting mechanism as FastAPI's built-in `/docs`:
-
-1. `mount_stream_ui(app)` registers two routes: `GET /stream-ui` (the UI) and `GET /stream-ui/_endpoints` (the discovery API).
-2. The UI is a **single self-contained HTML page** — inline CSS + JS, zero external runtime dependencies.
-3. On load, the UI calls `/_endpoints` to fetch all annotated routes.
-4. For SSE: the browser opens a native `EventSource` to your endpoint and streams events live into the UI.
-5. For WS: the browser opens a `WebSocket`, shows incoming messages, and lets you send messages interactively.
-6. Auth tokens are injected client-side — Stream-ui never proxies your traffic.
-
----
-
-## Distribution
-
-```bash
-# Build the package
-uv build
-# → dist/stream-ui-0.1.0.tar.gz
-# → dist/stream-ui-0.1.0-py3-none-any.whl
-```
-
-Publish to PyPI:
-```bash
-# Upload using twine (via uvx)
-uvx twine upload dist/*
 ```
 
 ---

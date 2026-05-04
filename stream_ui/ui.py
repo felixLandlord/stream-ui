@@ -960,8 +960,9 @@ function connectSSEWithUrl(path, url, ep) {{
 
       if (!autoReconnect) {{
         setStatus('error', 'disconnected');
-        appendEvent('err', null, 'Connection closed (auto-reconnect disabled)');
+        appendEvent('err', null, 'Connection closed \\u2014 click \\u21bb Resume to reconnect manually');
         setDot(path, 'error');
+        state.sseDropped = true;
         toggleButtons(false);
         return;
       }}
