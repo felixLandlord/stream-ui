@@ -33,6 +33,26 @@ StreamUI(app).mount()
 
 ---
 
+## Screenshots
+
+### Server-Sent Events (SSE)
+![SSE Stream](screenshots/sse.png)
+*Real-time event streaming with automatic reconnects and parameter support.*
+
+### Manual Resume
+![SSE Resume](screenshots/sse_resume.png)
+*Toggle auto-reconnect or manually resume dropped streams.*
+
+### WebSockets
+![WebSocket](screenshots/ws.png)
+*Interactive WebSocket sessions with a persistent message history.*
+
+### Message Queueing
+![WS Queue](screenshots/ws_queue.png)
+*Queue messages while disconnected; they are sent automatically upon reconnection.*
+
+---
+
 ## Decorators
 
 ### `@sse_endpoint(...)`
