@@ -699,10 +699,16 @@ function makeEpItem(ep) {{
   dot.className = 'ep-status-dot';
   state.dotRefs[ep.path] = dot;
 
+  const methods = ep.methods || [];
+  const hasGet = methods.some(m => m.toUpperCase() === 'GET');
+  const methodAlert = (ep.kind === 'sse' && methods.length > 0 && !hasGet)
+    ? `<span class="ep-badge" style="background:rgba(240,80,80,0.1); color:var(--accent-err); border:1px solid rgba(240,80,80,0.2); font-size:8px; margin-left:4px; padding:1px 4px;">${{methods.join(',')}}</span>`
+    : '';
+
   div.innerHTML = `
     <span class="ep-badge ${{ep.kind}}">${{ep.kind.toUpperCase()}}</span>
     <div class="ep-info">
-      <div class="ep-path" title="${{ep.path}}">${{ep.path}}</div>
+      <div class="ep-path" title="${{ep.path}}">${{ep.path}}${{methodAlert}}</div>
       ${{ep.summary ? `<div class="ep-summary">${{ep.summary}}</div>` : ''}}
     </div>
   `;
@@ -822,6 +828,16 @@ function connectSSE() {{
   const url = buildUrl(path, params) + getAuthQueryString();
 
   clearOutput();
+
+  // Check if endpoint supports GET (required for EventSource)
+  if (ep && ep.kind === 'sse' && ep.methods && ep.methods.length > 0) {{
+    const hasGet = ep.methods.some(m => m.toUpperCase() === 'GET');
+    if (!hasGet) {{
+      appendEvent('err', null, `⚠️ Method Warning: This endpoint only supports [${{ep.methods.join(', ')}}], but SSE (EventSource) requires GET.`);
+      appendEvent('sys', null, `Tip: Change @app.post to @app.get (or @app.api_route) to use this endpoint with Stream-ui.`);
+    }}
+  }}
+
   setStatus('waiting', 'connecting…');
   appendEvent('sys', null, `Connecting to ${{path}} …`);
 

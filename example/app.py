@@ -135,6 +135,22 @@ async def log_tail(level: str = "INFO"):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+# ── SSE: Broken (POST-only) ────────────────────────────────────────────────
+
+@app.post("/events/broken", tags=["Streaming"])
+@sse_endpoint(
+    summary="Broken POST endpoint",
+    description="This endpoint is intentionally POST-only to demonstrate Stream-ui's method warning system. "
+                "Since standard SSE (EventSource) requires GET, this will show an alert in the UI.",
+    tags=["Streaming"],
+)
+async def broken_sse():
+    """A POST-only SSE endpoint that will trigger UI warnings."""
+    async def generate() -> AsyncIterator[str]:
+        yield "data: this will never be reached via Stream-ui\n\n"
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 # ── WebSocket: Echo ────────────────────────────────────────────────────────
 
 @app.websocket("/ws/echo")

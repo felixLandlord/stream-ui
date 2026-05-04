@@ -20,7 +20,7 @@ _STREAMUI_META_ATTR = "__stream_ui_meta__"
 class EndpointMeta:
     """Metadata attached to an annotated endpoint function."""
 
-    __slots__ = ("kind", "summary", "description", "tags", "path", "params")
+    __slots__ = ("kind", "summary", "description", "tags", "path", "params", "methods")
 
     def __init__(
         self,
@@ -30,6 +30,7 @@ class EndpointMeta:
         tags: List[str],
         path: Optional[str],
         params: List[dict],
+        methods: Optional[List[str]] = None,
     ) -> None:
         self.kind = kind
         self.summary = summary
@@ -37,6 +38,7 @@ class EndpointMeta:
         self.tags = tags
         self.path = path  # resolved later during mount
         self.params = params
+        self.methods = methods or []
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +48,7 @@ class EndpointMeta:
             "tags": self.tags,
             "path": self.path,
             "params": self.params,
+            "methods": self.methods,
         }
 
 

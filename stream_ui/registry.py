@@ -56,11 +56,15 @@ class StreamUIRegistry:
                 continue
 
             path = route.path  # type: ignore[attr-defined]
+            methods = list(getattr(route, "methods", []))
 
             # For SSE routes, the path comes from the route itself.
             # For WS routes, it also comes from the route — but we allow
             # the decorator to override with an explicit path= kwarg.
             resolved_path = meta.path or path
+
+            # Backfill methods discovered from the FastAPI route table
+            meta.methods = methods
 
             self._endpoints.append(RegisteredEndpoint(path=resolved_path, meta=meta))
 
