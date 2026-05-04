@@ -861,6 +861,17 @@ function connectSSE() {{
 
   es.onmessage = (e) => {{
     if (e.lastEventId) state.lastEventId = e.lastEventId;
+
+    if (e.data === '[DONE]') {{
+      state.gracefulClose = true;
+      es.close();
+      setStatus('idle', 'completed');
+      appendEvent('sys', null, 'Stream finished ([DONE])');
+      setDot(path, '');
+      toggleButtons(false);
+      return;
+    }}
+
     appendEvent('in', e.lastEventId ? `id:${{e.lastEventId}}` : null, e.data);
   }};
 
@@ -954,6 +965,17 @@ function connectSSEWithUrl(path, url, ep) {{
 
   es.onmessage = (e) => {{
     if (e.lastEventId) state.lastEventId = e.lastEventId;
+
+    if (e.data === '[DONE]') {{
+      state.gracefulClose = true;
+      es.close();
+      setStatus('idle', 'completed');
+      appendEvent('sys', null, 'Stream finished ([DONE])');
+      setDot(path, '');
+      toggleButtons(false);
+      return;
+    }}
+
     appendEvent('in', e.lastEventId ? `id:${{e.lastEventId}}` : null, e.data);
   }};
 
