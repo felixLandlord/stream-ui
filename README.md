@@ -14,7 +14,7 @@ pip install stream-ui
 
 ```python
 from fastapi import FastAPI
-from stream_ui import mount_stream_ui, sse_endpoint, ws_endpoint
+from stream_ui import StreamUI, sse_endpoint, ws_endpoint
 
 app = FastAPI()
 
@@ -27,7 +27,7 @@ async def events():
 @ws_endpoint(summary="Chat socket", tags=["Streaming"], path="/ws/chat")
 async def chat(websocket): ...
 
-mount_stream_ui(app)
+StreamUI(app).mount()
 # → http://localhost:8000/stream-ui
 ```
 
@@ -139,11 +139,11 @@ Stream-ui handles auth the same way Swagger UI does — you provide credentials 
 **API key:** Optional `X-API-Key` header field (enable with `enable_api_key=True`).
 
 ```python
-mount_stream_ui(
+StreamUI(
     app,
     default_token="dev-secret-token",  # pre-fills the auth panel
     enable_api_key=True,
-)
+).mount()
 ```
 
 On the server side, check both header and fallback query param:
@@ -160,16 +160,16 @@ def get_token(
 
 ---
 
-## `mount_stream_ui` options
+## `StreamUI` options
 
 ```python
-mount_stream_ui(
+StreamUI(
     app,
     path="/stream-ui",        # URL prefix (default: "/stream-ui")
     title="Stream-ui",        # Browser tab title
-    default_token=None,        # Pre-fill bearer token field
-    enable_api_key=True,       # Show API key field in auth panel
-)
+    default_token=None,       # Pre-fill bearer token field
+    enable_api_key=True,      # Show API key field in auth panel
+).mount()
 ```
 
 ---

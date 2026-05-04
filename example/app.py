@@ -1,4 +1,4 @@
-"""
+r"""
 Stream-ui example app.
 
 Run with:
@@ -32,7 +32,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from stream_ui import mount_stream_ui, sse_endpoint, ws_endpoint
+from stream_ui import StreamUI, sse_endpoint, ws_endpoint
 
 app = FastAPI(
     title="Stream-ui Example",
@@ -226,15 +226,86 @@ async def ws_calc(websocket: WebSocket):
         pass
 
 
+# ── SSE: Unreliable stream (simulates network drops) ───────────────────────
+
+@app.get("/events/unreliable", tags=["Streaming"])
+@sse_endpoint(
+    summary="Unreliable stream (network drops)",
+    description="Simulates a flaky network connection. "
+                "Every ~10 events the stream drops and reconnects automatically. "
+                "Useful for testing reconnection handling in the UI.",
+    tags=["Streaming"],
+)
+async def unreliable_stream():
+    """SSE stream that periodically drops and reconnects."""
+
+    async def generate() -> AsyncIterator[str]:
+        counter = 0
+        reconnect_count = 0
+        while True:
+            counter += 1
+            if counter % 10 == 0:
+                reconnect_count += 1
+                yield f"event: reconnect\ndata: {json.dumps({'attempt': reconnect_count})}\n\n"
+                break
+            payload = json.dumps({
+                "counter": counter,
+                "message": "still connected" if counter % 5 != 0 else "drop incoming",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+            yield f"data: {payload}\n\n"
+            await asyncio.sleep(0.5)
+        return
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ── WebSocket: Flaky connection (heartbeat + drops) ───────────────────────
+
+@app.websocket("/ws/flaky")
+@ws_endpoint(
+    summary="Flaky WebSocket (heartbeat + drops)",
+    description="Simulates an unstable WebSocket connection. "
+                "Sends periodic heartbeat messages and occasionally drops the connection. "
+                "Useful for testing reconnection logic in the UI.\n\n"
+                "Heartbeats are sent every 3 seconds. Connection drops every ~5 heartbeats.",
+    tags=["WebSocket"],
+    path="/ws/flaky",
+)
+async def ws_flaky(websocket: WebSocket):
+    """WebSocket that sends heartbeats and periodically drops."""
+    await websocket.accept()
+    heartbeat_count = 0
+    try:
+        while True:
+            heartbeat_count += 1
+            await websocket.send_text(json.dumps({
+                "type": "heartbeat",
+                "count": heartbeat_count,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }))
+            if heartbeat_count % 5 == 0:
+                await websocket.send_text(json.dumps({
+                    "type": "dropping",
+                    "reason": "simulated_network_drop",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }))
+                break
+            await asyncio.sleep(3)
+    except WebSocketDisconnect:
+        pass
+
+
 # ── Mount Stream-ui ───────────────────────────────────────────────────────
 
-mount_stream_ui(
+stream_ui = StreamUI(
     app,
     path="/stream-ui",
     title="Stream-ui Example",
     enable_api_key=True,
 )
 
+stream_ui.mount()
 
 # ── Health check ───────────────────────────────────────────────────────────
 
